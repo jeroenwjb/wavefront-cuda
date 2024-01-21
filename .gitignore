@@ -1,0 +1,10 @@
+cudart
+cudart.o
+.jpg
+.ppm
+.vs
+.vscode
+.exe
+.exp
+.lib
+.obj
