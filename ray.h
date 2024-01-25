@@ -15,4 +15,15 @@ class ray
         vec3 B;
 };
 
+
+class new_ray
+{
+    public:
+        __device__ new_ray() {}
+        __device__ new_ray(const vec3& a, const vec3& b) { A = a; B = b; }
+
+        vec3 A;
+        vec3 B;
+};
+
 #endif
