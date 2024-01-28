@@ -16,6 +16,10 @@ struct hit_record
 class hitable  {
     public:
         __device__ virtual bool hit(const ray& r, float t_min, float t_max, hit_record& rec) const = 0;
+        __device__ virtual bool hit_wavefront(const ray& r, float t_min, float t_max, float& dist, int& objIdx) const = 0;
+        __device__ virtual vec3 prim_normal(int primIdx, vec3 I);
+        __device__ virtual hitable* get_hittable(int primIdx);
+        __device__ virtual material* get_mat_ptr(int primIdx);
 };
 
 #endif
