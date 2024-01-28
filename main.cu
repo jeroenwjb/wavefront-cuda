@@ -91,7 +91,7 @@ __global__ void generate_primary_ray(ray *generate_buffer, int max_x, int max_y,
 }
 
 __global__ void Extend(ray *generate_buffer, int no_rays, hitable **world){
-    int thread_index = threadIdx.x + blockIdx.x * 256;
+    int thread_index = threadIdx.x + blockIdx.x * 64;
     if(thread_index >= no_rays) return;
     // int thread_index = i;
 
@@ -110,7 +110,7 @@ __global__ void Extend(ray *generate_buffer, int no_rays, hitable **world){
 } 
 
 __global__ void Shade(ray *generate_buffer, ray *new_ray_buffer, vec3 *accumulator, int no_rays,  hitable **world, curandState *rand_state){
-    int thread_index = threadIdx.x + blockIdx.x * 256;
+    int thread_index = threadIdx.x + blockIdx.x * 64;
     if(thread_index >= no_rays) return;
     ray r = generate_buffer[thread_index];
 
@@ -140,7 +140,6 @@ __global__ void Shade(ray *generate_buffer, ray *new_ray_buffer, vec3 *accumulat
         // printf("Address stored in ptr: %p\n", (void *)mat_ptr);
 
         if(mat_ptr != nullptr && mat_ptr->scatter(r, rec, color, bounce_ray, &local_rand_state)){
-            // if(no_rays != 2073600) printf("========================\n");
             int ei = atomicAdd(&d_shade_new_ray_counter, 1);
             bounce_ray.pixel_index = pixel_index;
             new_ray_buffer[ei] = bounce_ray;
@@ -294,8 +293,8 @@ int main() {
     int tx = 8;
     int ty = 8;
 
-    std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
-    std::cerr << "in " << tx << "x" << ty << " blocks.\n";
+    // std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
+    // std::cerr << "in " << tx << "x" << ty << " blocks.\n";
 
     int num_pixels = nx*ny;
 
@@ -370,7 +369,7 @@ int main() {
             //  The output of this phase is an intersection result for each ray, stored in a buffer.   TODO
             
             for(int i = 0; i < 50; i++) {
-                int threads = 256;
+                int threads = 64;
                 int blocks = (no_of_rays_to_trace + threads - 1) / threads;
 
                 Extend<<<blocks, threads>>>(generate_buffer, no_of_rays_to_trace, d_world);
@@ -430,7 +429,6 @@ int main() {
         double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
         std::cerr << "took " << timer_seconds << " seconds.\n";
 
-        std::cerr << d_general_accumulator[0].r() << "\n";
 
         std::cout << "P3\n" << nx << " " << ny << "\n255\n";
         for (int j = ny-1; j >= 0; j--) {
