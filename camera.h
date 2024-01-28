@@ -37,12 +37,6 @@ public:
         return ray(origin + offset, lower_left_corner + s*horizontal + t*vertical - origin - offset);
     }
 
-    __device__ new_ray get_new_ray(float s, float t, curandState *local_rand_state) {
-        vec3 rd = lens_radius*random_in_unit_disk(local_rand_state);
-        vec3 offset = u * rd.x() + v * rd.y();
-        return new_ray(origin + offset, lower_left_corner + s*horizontal + t*vertical - origin - offset);
-    }
-
     vec3 origin;
     vec3 lower_left_corner;
     vec3 horizontal;
