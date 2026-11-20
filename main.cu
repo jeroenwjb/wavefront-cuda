@@ -3,6 +3,8 @@
 #include <float.h>
 #include <curand_kernel.h>
 #include <stdio.h>
+#include <string.h>
+#include <utility>
 #include "vec3.h"
 #include "ray.h"
 #include "sphere.h"
@@ -13,8 +15,8 @@
 // limited version of checkCudaErrors from helper_cuda.h in CUDA examples
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
 
+// number of bounce rays written by the last Shade pass
 __device__ int d_shade_new_ray_counter = 0;
-// __device__ int* accumulator;
 
 void check_cuda(cudaError_t result, char const *const func, const char *const file, int const line) {
     if (result) {
@@ -90,37 +92,34 @@ __global__ void generate_primary_ray(ray *generate_buffer, int max_x, int max_y,
     rand_state[pixel_index] = local_rand_state;
 }
 
+// Intersects every ray in the buffer with the scene; stores hit distance and primitive index on the ray.
 __global__ void Extend(ray *generate_buffer, int no_rays, hitable **world){
-    int thread_index = threadIdx.x + blockIdx.x * 64;
+    int thread_index = threadIdx.x + blockIdx.x * blockDim.x;
     if(thread_index >= no_rays) return;
-    // int thread_index = i;
 
     ray cur_ray = generate_buffer[thread_index];
-    
+
     float dist;
     int objIdx;
-    // printf("%f\n", cur_ray.t);
-    bool hit = (*world)->hit_wavefront(cur_ray, 0.001f, FLT_MAX, dist, objIdx);        // Needs to be optimized
+    bool hit = (*world)->hit_wavefront(cur_ray, 0.001f, FLT_MAX, dist, objIdx);
 
-    // printf("pixel id: %i with hit: %d hitting: %i at dist: %f\n", cur_ray.pixel_index, hit, objIdx, dist);
     if(hit){
-        generate_buffer[thread_index].t = dist;   
-        generate_buffer[thread_index].prim_idx = objIdx;   
-    } 
-} 
+        generate_buffer[thread_index].t = dist;
+        generate_buffer[thread_index].prim_idx = objIdx;
+    }
+}
 
+// Shades every hit; scattering paths write their bounce ray to new_ray_buffer.
 __global__ void Shade(ray *generate_buffer, ray *new_ray_buffer, vec3 *accumulator, int no_rays,  hitable **world, curandState *rand_state){
-    int thread_index = threadIdx.x + blockIdx.x * 64;
+    int thread_index = threadIdx.x + blockIdx.x * blockDim.x;
     if(thread_index >= no_rays) return;
     ray r = generate_buffer[thread_index];
-
 
     int primIdx = r.primIdx();
     int pixel_index = r.pixelIndex();
     vec3 Direction = r.direction();
 
     if (primIdx != -1){
-        vec3 Origin = r.origin();
         float Dist = r.distance();
         vec3 I = r.point_at_parameter(Dist);
         vec3 N = (*world)->prim_normal(primIdx, I);
@@ -132,12 +131,6 @@ __global__ void Shade(ray *generate_buffer, ray *new_ray_buffer, vec3 *accumulat
         curandState local_rand_state = rand_state[pixel_index];
 
         hit_record rec = {Dist, I, N, mat_ptr};
-
-        // if(NEE){    // NEE not present in raytracing in a weekend
-        //     si = atomicInc(shadowrayIdx);
-        //     shadowBuffer[si] = shadowray();
-        // }
-        // printf("Address stored in ptr: %p\n", (void *)mat_ptr);
 
         if(mat_ptr != nullptr && mat_ptr->scatter(r, rec, color, bounce_ray, &local_rand_state)){
             int ei = atomicAdd(&d_shade_new_ray_counter, 1);
@@ -155,8 +148,14 @@ __global__ void Shade(ray *generate_buffer, ray *new_ray_buffer, vec3 *accumulat
         vec3 c = (1.0f-t)*vec3(1.0, 1.0, 1.0) + t*vec3(0.5, 0.7, 1.0);
         accumulator[pixel_index] *= c;
     }
+}
 
-} 
+// Paths still alive after the bounce limit contribute nothing, as in color().
+__global__ void terminate_remaining(ray *ray_buffer, vec3 *accumulator, int no_rays){
+    int thread_index = threadIdx.x + blockIdx.x * blockDim.x;
+    if(thread_index >= no_rays) return;
+    accumulator[ray_buffer[thread_index].pixelIndex()] = vec3(0.0,0.0,0.0);
+}
 
 
 __global__ void render(vec3 *fb, int max_x, int max_y, int ns, camera **cam, hitable **world, curandState *rand_state) {
@@ -242,7 +241,7 @@ __global__ void resetCounter() {
 __global__ void initializeAccumulator(vec3* accumulator, int numElements) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numElements) {
-        accumulator[idx] = vec3(1.0f, 1.0f, 1.0f); // Initializing accumulator with vec3(1.0, 1.0, 1.0)
+        accumulator[idx] = vec3(1.0f, 1.0f, 1.0f);
     }
 }
 
@@ -254,16 +253,12 @@ __global__ void accumulatorrays(vec3* d_general_accumulator, vec3* accumulator, 
     d_general_accumulator[thread_index] += accumulator[thread_index];
 }
 
+int main(int argc, char **argv) {
 
+    cudaSetDevice(0);
 
-
-
-int main() {
-
-	cudaSetDevice( 0 );
-
-    bool wavefront = true;
-
+    // default: wavefront; pass --megakernel for the original renderer
+    bool wavefront = !(argc > 1 && strcmp(argv[1], "--megakernel") == 0);
 
     cudaDeviceProp prop;
     int deviceCount;
@@ -282,8 +277,6 @@ int main() {
         std::cerr << "  Compute capability: " << prop.major << "." << prop.minor << std::endl;
         std::cerr << "  Total global memory: " << prop.totalGlobalMem << " bytes" << std::endl;
         std::cerr << "  Multiprocessors: " << prop.multiProcessorCount << std::endl;
-        std::cerr << "  Clock rate: " << prop.clockRate << " kHz" << std::endl;
-
         std::cerr << std::endl;
     }
 
@@ -293,11 +286,10 @@ int main() {
     int tx = 8;
     int ty = 8;
 
-    // std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
-    // std::cerr << "in " << tx << "x" << ty << " blocks.\n";
+    std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples per pixel ";
+    std::cerr << "(" << (wavefront ? "wavefront" : "megakernel") << ").\n";
 
     int num_pixels = nx*ny;
-
 
     // allocate random state
     curandState *d_rand_state;
@@ -336,94 +328,68 @@ int main() {
         vec3 *d_general_accumulator;
         checkCudaErrors(cudaMallocManaged((void **)&d_general_accumulator, d_general_accumulator_size));
 
+        // two ray buffers, swapped every bounce
+        ray *generate_buffer;
+        ray *shade_new_ray_buffer;
+        checkCudaErrors(cudaMalloc((void **)&generate_buffer, num_pixels*sizeof(ray)));
+        checkCudaErrors(cudaMalloc((void **)&shade_new_ray_buffer, num_pixels*sizeof(ray)));
 
+        vec3 *d_accumulator;
+        checkCudaErrors(cudaMalloc((void **)&d_accumulator, num_pixels*sizeof(vec3)));
+
+        const int threads = 64;
 
         for(int s=0; s < ns; s++) {
             int no_of_rays_to_trace = num_pixels;
-            size_t generate_buffer_size = no_of_rays_to_trace*sizeof(ray);
-            ray *generate_buffer;
-            checkCudaErrors(cudaMallocManaged((void **)&generate_buffer, generate_buffer_size));
 
-            size_t accumulator_size = num_pixels*sizeof(vec3);
-            vec3 *d_accumulator;
-            checkCudaErrors(cudaMallocManaged((void **)&d_accumulator, accumulator_size));
-            initializeAccumulator<<<(no_of_rays_to_trace + 256 - 1) / 256, 256>>>(d_accumulator, num_pixels);
+            initializeAccumulator<<<(num_pixels + 256 - 1) / 256, 256>>>(d_accumulator, num_pixels);
             checkCudaErrors(cudaGetLastError());
-            checkCudaErrors(cudaDeviceSynchronize());
 
-
-            // Phase 1 generate:
-            checkCudaErrors(cudaDeviceSynchronize());
+            // Phase 1 (Generate)
+            // Generates one primary ray per pixel and stores it in a buffer.
             generate_primary_ray<<<blocks3D, threads3D>>>(generate_buffer, nx, ny, d_camera, d_rand_state);
             checkCudaErrors(cudaGetLastError());
-            checkCudaErrors(cudaDeviceSynchronize());
 
-            //TODO FIX THIS SHIT FOR FUTURE
-
-            
-
-            // Phase 2 (‘Extend’) 
-            // It is executed only after phase 1 has completed for all pixels.     DONE
-            // The kernel reads the buffer generated in phase 1,  DONE
-            // and intersects each ray with the scene.    DONE
-            //  The output of this phase is an intersection result for each ray, stored in a buffer.   TODO
-            
-            for(int i = 0; i < 50; i++) {
-                int threads = 64;
+            for(int i = 0; i < 50 && no_of_rays_to_trace > 0; i++) {
                 int blocks = (no_of_rays_to_trace + threads - 1) / threads;
 
+                // Phase 2 (Extend)
+                // Executed only after the previous phase has completed for all rays.
+                // Reads the ray buffer and intersects each ray with the scene.
+                // The intersection result is stored on the ray in the same buffer.
                 Extend<<<blocks, threads>>>(generate_buffer, no_of_rays_to_trace, d_world);
                 checkCudaErrors(cudaGetLastError());
-                checkCudaErrors(cudaDeviceSynchronize());
 
-                // Phase 3 (Shade) 
-                // executes after phase 2 is completely done. 
-                // It takes the intersection result from phase 2 and evaluates the shading model for each path. 
-                // This may or may not generate new rays, depending on whether a path was terminated or not. 
-                // A paths that spawns a new ray (the path is ‘extended’) writes a new ray (‘path segment’) to a buffer. 
-                // Paths that directly sample light sources (‘explicit light sampling’ or ‘next event estimation’) write a shadow ray to a second buffer.
-
-                // New ray buffer
-                size_t shade_new_ray_buffer_size = no_of_rays_to_trace*sizeof(ray);
-                ray *shade_new_ray_buffer;
-                checkCudaErrors(cudaMallocManaged((void **)&shade_new_ray_buffer, shade_new_ray_buffer_size));
-
-
-
-                // Reset the counter to 0
                 resetCounter<<<1, 1>>>();
                 checkCudaErrors(cudaGetLastError());
-                checkCudaErrors(cudaDeviceSynchronize());
 
+                // Phase 3 (Shade)
+                // Executed after phase 2 is completely done.
+                // Takes the intersection result from phase 2 and evaluates the shading model for each path.
+                // This may or may not generate a new ray, depending on whether the path was terminated.
+                // A path that spawns a new ray (the path is 'extended') writes it to the new ray buffer.
+                // Shadow rays for next event estimation are not used: Ray Tracing in One Weekend has no explicit light sampling.
                 Shade<<<blocks, threads>>>(generate_buffer, shade_new_ray_buffer, d_accumulator, no_of_rays_to_trace, d_world, d_rand_state);
                 checkCudaErrors(cudaGetLastError());
-                checkCudaErrors(cudaDeviceSynchronize());
 
-                cudaMemcpyFromSymbol(&no_of_rays_to_trace, d_shade_new_ray_counter, sizeof(int), 0, cudaMemcpyDeviceToHost);
-                cudaFree(generate_buffer); // Free the existing generate_buffer
-                generate_buffer = shade_new_ray_buffer;
+                // blocking copy: the host needs the count to size the next launch
+                checkCudaErrors(cudaMemcpyFromSymbol(&no_of_rays_to_trace, d_shade_new_ray_counter, sizeof(int), 0, cudaMemcpyDeviceToHost));
+                std::swap(generate_buffer, shade_new_ray_buffer);
+            }
+
+            if(no_of_rays_to_trace > 0){
+                terminate_remaining<<<(no_of_rays_to_trace + threads - 1) / threads, threads>>>(generate_buffer, d_accumulator, no_of_rays_to_trace);
+                checkCudaErrors(cudaGetLastError());
             }
 
             accumulatorrays<<<blocks3D, threads3D>>>(d_general_accumulator,  d_accumulator, nx, ny);
             checkCudaErrors(cudaGetLastError());
-            checkCudaErrors(cudaDeviceSynchronize());
-            // Shadow ray buffer
-            // raytracing in a weekend does not contain shadow rays :( 
-
-            // size_t shade_shdowray_buffer_size = num_pixels*sizeof(ray);
-            // std::cerr << "shade_shdowray_buffer_size " << shade_shdowray_buffer_size << "\n";
-            // ray *shade_shdowray_buffer;        
-            // checkCudaErrors(cudaMallocManaged((void **)&shade_shdowray_buffer, shade_shdowray_buffer_size));
-
-            
-            
-
-            // Shade<<<blocks, threads>>>(generate_buffer, extend_buffer, nx, ny, d_camera, d_world, d_rand_state);
-
-            // Output FB as Image
-            checkCudaErrors(cudaFree(generate_buffer));
-            checkCudaErrors(cudaFree(d_accumulator));
         }
+        checkCudaErrors(cudaDeviceSynchronize());
+
+        checkCudaErrors(cudaFree(generate_buffer));
+        checkCudaErrors(cudaFree(shade_new_ray_buffer));
+        checkCudaErrors(cudaFree(d_accumulator));
 
         stop = clock();
         double timer_seconds = ((double)(stop - start)) / CLOCKS_PER_SEC;
@@ -441,14 +407,11 @@ int main() {
             }
         }
 
-        // generate(generate_buffer, blocks, threads, nx, ny, d_camera, d_rand_state);    
-
-    } 
-    if(!wavefront)
-    // else
+        checkCudaErrors(cudaFree(d_general_accumulator));
+    }
+    else
     {
         size_t fb_size = num_pixels*sizeof(vec3);
-        // allocate FB
         vec3 *fb;
         checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
 
@@ -471,10 +434,7 @@ int main() {
             }
         }
 
-        // clean up
-
         checkCudaErrors(cudaFree(fb));
-
     }
 
     checkCudaErrors(cudaDeviceSynchronize());

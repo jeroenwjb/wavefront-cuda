@@ -44,12 +44,10 @@ __device__ vec3 sphere::prim_normal(int primIdx, vec3 I){
 }
 
 __device__ hitable* sphere::get_hittable(int primIdx){
-    printf("This code should not run");
     return nullptr;
 }
 
 __device__ material* sphere::get_mat_ptr(int primIdx){
-    // printf("This code should not run");
     return mat_ptr;
 }
 

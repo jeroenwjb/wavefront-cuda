@@ -1,13 +1,13 @@
-CUDA_PATH     ?= C:\programming\cuda\13.2
+CUDA_PATH     ?= C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0
 HOST_COMPILER  = cl
-NVCC           = $(CUDA_PATH)\bin\nvcc -ccbin $(HOST_COMPILER)
+NVCC           = "$(CUDA_PATH)\bin\nvcc" -ccbin $(HOST_COMPILER)
 
 # select one of these for Debug vs. Release
 # NVCC_DBG       = -g -G
 NVCC_DBG       =
 
-NVCCFLAGS      = $(NVCC_DBG) -m64
-GENCODE_FLAGS  = -gencode arch=compute_61,code=sm_61
+NVCCFLAGS      = $(NVCC_DBG) -m64 -O3
+GENCODE_FLAGS  = -gencode arch=compute_89,code=sm_89
 
 SRCS = main.cu
 INCS = vec3.h ray.h hitable.h hitable_list.h sphere.h camera.h material.h

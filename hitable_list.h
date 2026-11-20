@@ -48,12 +48,10 @@ __device__ vec3 hitable_list::prim_normal(int primIdx, vec3 I) {
 }
 
 __device__ hitable* hitable_list::get_hittable(int primIdx) {
-    // printf("getting hittable for %i, resulting in: %p", primIdx, list[primIdx]);
     return list[primIdx];
 }
 
 __device__ material* hitable_list::get_mat_ptr(int primIdx) {
-    // printf("getting hittable for %i, resulting in: %p", primIdx, list[primIdx]);
     return list[primIdx]->get_mat_ptr(primIdx);
 }
 
